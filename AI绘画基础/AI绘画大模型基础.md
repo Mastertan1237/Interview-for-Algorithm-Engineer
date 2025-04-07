@@ -817,7 +817,7 @@ SD 3与之前的版本相比，整体的参数量级大幅增加，这无疑也�
 
 整体上看，**其实SD 3的预计算策略是一个空间换时间的技术**。
 
-<h2 id="36.StableDiffusion中的Inpaint（局部修复）和Outpaint（边界扩展）分别是什么？36.Stable Diffusion 中的Inpaint和Outpaint分别是什么?">36.Stable Diffusion 中的Inpaint和Outpaint分别是什么?</h2>
+<h2 id="36.StableDiffusion中的Inpaint（局部修复）和Outpaint（边界扩展）分别是什么？">36.Stable Diffusion 中的Inpaint和Outpaint分别是什么?</h2>
 
 - **Inpaint（局部修复）** 指对图像中指定区域进行内容修复或替换的技术。用户可通过遮罩（Mask）标记需修改的区域，并输入文本提示（如“草地”或“删除物体”），模型将根据上下文生成与周围环境协调的新内容。典型应用包括移除水印、修复破损图像或替换特定对象。
 - **Outpaint（边界扩展）** 则用于扩展图像边界，生成超出原图范围的合理内容。例如，将一幅风景画的左右两侧延伸，生成连贯的山脉或天空。其核心挑战在于保持扩展区域与原始图像在风格、光照和语义上的一致性。
