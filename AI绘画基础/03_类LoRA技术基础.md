@@ -1,12 +1,7 @@
 # 目录
 
 - [1.使用lora微调Stable Diffusion模型](#1.使用lora微调Stable_Diffusion模型)
-- [2.用于图像生成的多lora组合](#2.用于图像生成的多lora组合)
-- [3.Hypernetwork是什么？](#3.Hypernetwork是什么？)
-- [4.HyperDreamBooth是什么？](#4.HyperDreamBooth是什么？)
-- [5.DiffLoRA是什么？](#5.DiffLoRA是什么？)
-- [6.AutoLoRA是什么？](#6.AutoLoRA是什么？)
-- [7.LoRA of Change是什么？](#7.LoRAofChange是什么？)
+- [2.在多LoRA组合推理时，有哪些融合策略？这些策略各自的优缺点是什么？](#2.在多LoRA组合推理时，有哪些融合策略？这些策略各自的优缺点是什么？)
 - [8.什么是Textual Inversion(文本反演)？](#8.什么是Textual-Inversion(文本反演)？)
 - [9.什么是DreamBooth技术？](#9.什么是DreamBooth技术？)
 - [10.LoRA和DreamBooth对比](#10.LoRA和DreamBooth对比)
@@ -29,6 +24,7 @@
 - [27.介绍一下LoHa的原理](#27.介绍一下LoHa的原理)
 - [28.介绍一下B-LoRA的原理](#28.介绍一下B-LoRA的原理)
 - [29.介绍一下Parameter-Efficient Fine-Tuning(PEFT)技术的概念，其在AIGC图像生成领域的应用场景有哪些？](#29.介绍一下Parameter-Efficient-Fine-Tuning(PEFT)技术的概念，其在AIGC图像生成领域的应用场景有哪些？)
+- [30.如何训练得到差异化LoRA？差异化LoRA的作用是什么？](#30.如何训练得到差异化LoRA？差异化LoRA的作用是什么？)
 
 <h2 id="1.使用lora微调Stable_Diffusion模型">1.使用lora微调Stable Diffusion模型</h2>
 
@@ -43,186 +39,226 @@ LoRA也是一种微调 Stable Diffusion 模型的技术，其可用于对关键�
 ![image-20240611204740644](./imgs/lORA.png)
 
 
-<h2 id="2.用于图像生成的多lora组合">2.用于图像生成的多lora组合</h2>
+<h2 id="2.在多LoRA组合推理时，有哪些融合策略？这些策略各自的优缺点是什么？">2.在多LoRA组合推理时，有哪些融合策略？这些策略各自的优缺点是什么？</h2>
+
+我们在使用多个LoRA模型进行组合（如不同的角色、服装、风格、背景等）推理时，除了使用经典的Merge策略外，还可以使用Switch和Composite两种高阶组合策略。
+
+![多LoRA组合生成效果](./imgs/多LoRA组合生成效果.png)
+
+
+**在大量不同功能的LoRA模型组合推理时，通过Merge策略会损失一些LoRA的原本特征细节，甚至完全丢失某个LoRA的特征，使其完全失效**。而Switch和Composite策略都会比Merge策略保留更多LoRA的原本特征，同时通过Switch和Composite策略生成的图像中的人物角色特征会比Merge策略要更自然。
+
+![多个LoRA的Merge、Switch和Composite推理组合策略示意图](./imgs/多个LoRA的Merge、Switch和Composite推理组合策略示意图.png)
+
+### 方法一：Merge（传统融合方法）
+
+#### 核心原理
+Merge 方法是最直接的融合方式，它将多个 LoRA 的权重**同时激活并加权平均**，在整个去噪过程中持续生效。
+
+#### 代码实现
+
+```python
+# 在 example.py 中
+if args.method == "merge":
+    pipeline.set_adapters(cur_loras)  # 同时激活所有 LoRA
+    switch_callback = None
+```
+
+#### 工作流程
+1. **初始化阶段**：加载所有需要的 LoRA 模型
+2. **激活阶段**：通过 `pipeline.set_adapters(["character", "clothing"])` 同时激活所有 LoRA
+3. **生成阶段**：在每个去噪步骤中，UNet 同时应用所有 LoRA 的权重修正
+
+#### 数学表示
+在每个去噪步骤 t，噪声预测为：
 
-论文链接:https://arxiv.org/abs/2402.16843.pdf
+```
+noise_pred = UNet(latent_t, prompt_embeds, LoRA₁ + LoRA₂ + ... + LoRAₙ)
+```
 
-![image-20240611203109836](./imgs/多lora效果.png)
+其中每个 LoRA 通过 `cross_attention_kwargs={"scale": 0.8}` 控制权重。
 
-### **LoRA Merge**:
-
-- 这种方法通过线性组合多个LoRAs来合成一个统一的LoRA，进而整合到文本到图像的模型中。
-- 主要优点是能够统一多个元素，但它的一个缺点是没有考虑到生成过程中与扩散模型的交互，可能导致像汉堡包和手指这样的元素在图像中变形。
-
-### **LoRA Switch (LoRA-S)**:
-
-- LoRA Switch旨在每个去噪步骤中激活单个LoRA，通过在解码过程中定时激活各个LoRA，引入了一种动态适应机制。
-- 图中用独特的颜色表示每个LoRA，每个步骤中只激活一个LoRA。
-- 这种方法允许在扩散模型的不同解码步骤中精确控制元素的影响，提高了生成图像的灵活性和控制精度。
-
-### **LoRA Composite (LoRA-C)**:
-
-- LoRA Composite探索在每个时间步骤中整合所有LoRA，而不是合并权重矩阵。
-- 它通过汇总每个LoRA在每一步的无条件和条件评分估计来实现，从而在图像生成过程中提供平衡的指导。
-- 这种方法有助于保持所有不同LoRA代表的元素的连贯整合，增强了图像的整体一致性和质量。
-
-![image-20240611202719934](./imgs/多lora生成.png)
-
-
-<h2 id="3.Hypernetwork是什么？">3.Hypernetwork是什么？</h2>
-
-Hypernetwork，也被称为“超网络”，是一种附加到 Stable Diffusion 模型的小型神经网络。它的主要作用是通过插入到噪声预测器 UNet 的交叉注意力模块中，从而改变模型的风格表现。
-
-#### 2. Hypernetwork 与其他模型的区别
-
-##### Hypernetwork VS Checkpoint（大模型）
-
-- **Checkpoint 模型**：包含生成图像的所有必要信息，文件体积较大，通常在 2 GB 到 7 GB 之间。
-- **Hypernetwork**：文件体积较小，通常低于 200 MB，但不能单独使用，必须与 Checkpoint 模型配合才能生成图像。
-
-##### Hypernetwork VS LoRA 模型
-
-- **相似性**：Hypernetwork 和 LoRA 模型在文件大小上相似，通常都在 200 MB 以下，比 Checkpoint 模型要小。
-- **效果对比**：LoRA 模型一般能产生更好的效果，因此逐渐取代了 Hypernetwork 的位置。
-
-##### Hypernetwork VS Embeddings
-
-- **Embeddings**：通过“文本反转”（Textual Inversion）技术生成，它定义新的关键词来实现特定风格，不会改变模型结构。Embeddings 创建新的嵌入在文本编码器中。
-- **Hypernetwork**：通过将一个小型网络插入到噪声预测器的交叉注意力模块中来改变模型的输出风格。
-
-#### 3. Hypernetwork 的现状
-
-- **使用减少**：由于 LoRA 和 Embeddings 的出现，Hypernetwork 的使用频率逐渐下降。在一些社区资源库中，Hypernetwork 文件数量非常有限。
-- **效果有限**：虽然 Hypernetwork 的文件体积较大，但其效果往往不如更小的 Embeddings 文件，而这些效果可以通过其他方式实现，例如使用 Embeddings 或 LoRA 模型。
-
-
-<h2 id="4.HyperDreamBooth是什么？">4.HyperDreamBooth是什么？</h2>
-
-论文链接：https://arxiv.org/pdf/2307.06949
-
-这篇论文提出了一种名为 HyperDreamBooth 的新方法,用于快速和轻量级的主体驱动个性化文本到图像扩散模型。主要内容包括:
-
-1. **轻量级 DreamBooth (LiDB)**: 提出了一种新的低维权重空间,用于模型个性化,可以将个性化模型的大小减少到原始 DreamBooth 的 0.01%。
-
-2. **超网络架构**: 设计了一个超网络,可以从单个图像生成 LiDB 参数。超网络由 ViT 编码器和 Transformer 解码器组成。
-
-3. **rank-relaxed 快速微调**: 提出了一种技术,可以在几秒钟内显著提高输出主体的保真度。
-
-4. 性能
-
-   : 与 DreamBooth 和 Textual Inversion 等方法相比,HyperDreamBooth 在速度和质量上都有显著提升:
-
-   - 速度提高了 25 倍
-   - 模型大小减少了 10000 倍
-   - 在主体保真度和风格多样性方面取得了相当或更好的结果
-
-整体框架如下图：
-
-![image-20240902192807641](./imgs/HyperDreamBooth.png)
-
-Lightweight DreamBooth结构如下：
-
-![image-20240902193005109](./imgs/Lightweight DreamBooth.png)
-
-HyperDreamBooth 实现了快速、轻量级和高质量的文本到图像模型个性化,为创意应用开辟了新的可能性。
-
-
-<h2 id="5.DiffLoRA是什么？">5.DiffLoRA是什么？</h2>
-
-论文链接：https://arxiv.org/pdf/2408.06740
-
-DiffLoRA框架包含以下关键组成部分:
-
-1. LoRA权重自动编码器(LAE):将LoRA权重压缩到隐空间并进行重构。LAE采用1D卷积层作为主要压缩层,并引入权重保留损失来提高重构精度。
-2. 混合图像特征(MIF):利用MoE启发的门控网络,将人脸特征和图像特征相结合,更好地提取身份信息。
-3. 去噪过程:使用DiT架构和条件集成,通过迭代去噪生成LoRA隐表示。
-4. LoRA权重数据集构建:自动化流程生成多身份LoRA权重数据集,用于训练DiffLoRA。
-
-整体框架如下图：
-
-![difflora](./imgs/difflora.png)
-
-MIF结构图:
-
-![MIF](./imgs/MIF.png)
-
-这是一种利用扩散模型作为超网络来根据参考图像预测个性化低秩适应（LoRA）权重的方法。通过将这些 LoRA 权重集成到文本到图像模型中，DiffLoRA 无需进一步训练即可在推理过程中实现个性化。这是第一个利用扩散模型来生成面向身份的 LoRA 权重的模型。
-
-
-
-<h2 id="6.AutoLoRA是什么？">6.AutoLoRA是什么？</h2>
-
-论文链接：[2410.03941](https://arxiv.org/pdf/2410.03941)
-
-### 1. **方法概述**
-
-AutoLoRA 是一种提升扩散模型生成图像多样性和质量的新方法，主要结合了 **LoRA (低秩适应)** 和 **AutoGuidance** 技术：
-
-- **LoRA**：通过对大模型进行低秩微调，使其能够适应特定风格或领域，但通常由于训练数据有限，模型容易过拟合，导致生成图像的多样性不足。
-- **AutoGuidance**：通过让训练不足的模型版本指导完全训练的模型，从而在生成过程中引入更多多样性。
-
-AutoLoRA 结合了这两者的思路，通过让基础模型与 LoRA 微调模型共同指导图像生成，从而实现了在一致性和多样性之间的平衡。
-
-### 2. **核心机制**
-
-- **指导机制**：AutoLoRA 通过在每一步生成中，将基础模型 `ϵ(xt, y)` 和 LoRA 微调后的模型 `ϵLoRA(xt, y)` 的输出结合起来，控制生成的多样性：
-  $$
-  \epsilon_{\mathrm{\Lambda utoLoRA}}^{\gamma}(\mathbf{x}_t,y)=\epsilon(\mathbf{x}_t,y)+\gamma\cdot(\epsilon_{\mathrm{LoR\Lambda}}(\mathbf{x}_t,y)-\epsilon(\mathbf{x}_t,y)),
-  $$
-  其中 `γ` 是调节参数，决定了生成图像中基础模型多样性和 LoRA 模型适应性之间的平衡。
-
-- **无分类器指导 (CFG)**：AutoLoRA 为基础模型和 LoRA 微调模型分别应用 CFG，进一步提升生成过程中的控制力和多样性。
-
-![image-20241021173657563](./imgs/autolora效果.png)
-
-### 3. **关键思想**
-
-- **多样性与一致性的平衡**：通过结合基础和微调模型的输出，AutoLoRA 能在保留特定风格一致性的同时引入更多多样性。这解决了 LoRA 模型因小数据集训练导致的过拟合问题。
-- **双重指导**：单独为基础和微调模型应用 CFG，有助于增加生成图像的细节和质量，同时维持对输入提示的良好响应。
-- **探索与利用**：AutoLoRA 的设计类似于在探索（生成多样性）和利用（保持风格一致性）之间寻找最优点，使得生成的图像既符合预期风格，又能展示丰富的细节变化。
-
----
-
-<h2 id="7.LoRAofChange是什么？">7.LoRA of Change是什么？</h2>
-
-论文链接：[arxiv.org/pdf/2411.19156](https://arxiv.org/pdf/2411.19156)
-
-**LoRA of Change (LoC)** 是一种基于视觉指令（前后图像对）的图像编辑框架，通过学习动态生成的指令特定LoRA（Low-Rank Adaptation）编码图像变化，从而解决传统基于文本指令的模糊性问题。
-
-![image-20250223202819738](./imgs/lora_of_change.png)
-
-### **一、框架设计**
-
-1. **双重核心组件**
-
-   1. 超网络（Hypernetwork `H`）：负责根据输入的“前后图像对 `<A, A'>`生成对应的LoRA权重 `Δ`，捕捉两者间的编辑指令。超网络结构包含：
-
-      - **Vision Transformer编码器**：提取图像特征。
-        - **Transformer解码器**：通过多层交叉注意力机制融合特征，输出LoRA的权重矩阵。
-
-      ![image-20250223203306313](./imgs/LoC_genlora.jpg)
-
-   2. **生成模型（InstructPix2Pix ）**：基于预训练的扩散模型，利用LoRA `Δ` 对图像进行可控生成，如将原始图像 `B` 编辑为目标图像 `B'`。
-
-2. **训练阶段设计**
-
-   - 两阶段训练：
-     - **预训练（Stage 1）**：在大规模混合数据集（如SEED-Data-Edit）上预训练超网络和生成模型。
-     - **微调（Stage 2）**：在高质量数据集（如MagicBrush）上进一步优化，提高视觉CLIP分数（实验表明从0.193提升至0.214）。
-
-3. **推理流程**
-    在推理阶段，输入原始图像 `B` 和由 `<A, A'>` 生成的LoRA `Δ`，生成模型输出编辑后的图像 `B'`，同时确保与前后图像对的编辑逻辑一致。
-
-### **二、核心原理**
-
-1. **LoRA动态生成**
-   - 超网络通过视觉Transformer编码器提取前后图像对的隐层特征，并通过解码器生成低秩矩阵 `Δ`，直接注入生成模型的注意力层，精准编码“变化”指令。
-   - 相比文本倒置（Textual Inversion），LoRA的权重空间更适合捕捉细粒度视觉变化。
-2. **反向一致性训练（LoRA Reverse Training）**
-   - **双向重建**：通过 `B → B'` 和 `B' → B` 的双向重建损失，强制模型在不同编辑方向下保持一致性。
-   - **随机交换操作**：在训练中随机交换前后图像对顺序，增强模型对输入顺序的鲁棒性，防止信息泄漏。
-3. **解耦编辑指令与图像内容**
-   - LoRA `Δ` 封装了脱离原始图像内容的抽象编辑指令，可通过复用同一Δ实现跨图像的相同编辑效果，增强模型的泛化性.
+#### 优点
+- ✅ 实现简单，计算开销小
+- ✅ 生成速度快，只需一次前向传播
+
+#### 缺点
+- ❌ 多个 LoRA 权重叠加容易产生冲突
+- ❌ 难以精确控制每个元素的表现
+- ❌ 容易出现某些特征被"淹没"的问题
+
+### 方法二：Switch（轮流切换方法）
+
+#### 核心原理
+Switch 方法通过**在去噪过程中定期切换激活的 LoRA**，让每个 LoRA 轮流发挥作用，避免权重冲突。
+
+#### 代码实现
+
+```python
+# callbacks.py - 核心切换逻辑
+def make_callback(switch_step, loras):
+    def switch_callback(pipeline, step_index, timestep, callback_kwargs):
+        callback_outputs = {}
+        # 每隔 switch_step 步切换一次 LoRA
+        if step_index > 0 and step_index % switch_step == 0:
+            for cur_lora_index, lora in enumerate(loras):
+                if lora in pipeline.get_active_adapters():
+                    # 切换到下一个 LoRA
+                    next_lora_index = (cur_lora_index + 1) % len(loras)
+                    pipeline.set_adapters(loras[next_lora_index])
+                    break
+        return callback_outputs
+    return switch_callback
+```
+
+```python
+# example.py - 使用方式
+if args.method == "switch":
+    pipeline.set_adapters([cur_loras[0]])  # 先激活第一个 LoRA
+    switch_callback = make_callback(switch_step=5, loras=cur_loras)
+
+# 在生成时传入回调
+image = pipeline(
+    prompt=prompt,
+    callback_on_step_end=switch_callback,  # 每步结束时检查是否需要切换
+    ...
+)
+```
+
+#### 工作流程
+假设有 100 个去噪步骤，2 个 LoRA（character 和 clothing），switch_step=5：
+
+```
+步骤 0-4:    使用 LoRA_character
+步骤 5-9:    切换到 LoRA_clothing
+步骤 10-14:  切换到 LoRA_character
+步骤 15-19:  切换到 LoRA_clothing
+...循环往复
+```
+
+#### 关键参数
+- `switch_step`：控制切换频率，默认为 5
+  - 值越小：切换越频繁，融合越均匀
+  - 值越大：每个 LoRA 作用时间越长，特征越明显
+
+#### 数学表示
+在步骤 t，激活的 LoRA 由当前步数决定：
+
+```
+active_lora = loras[(t // switch_step) % num_loras]
+noise_pred = UNet(latent_t, prompt_embeds, active_lora)
+```
+
+#### 优点
+- ✅ 避免了权重叠加冲突
+- ✅ 每个 LoRA 都有独立发挥作用的时间
+- ✅ 通过调整 switch_step 可以控制融合程度
+
+#### 缺点
+- ❌ 仍然是一次只用一个 LoRA，可能无法充分体现多个特征的协同效果
+- ❌ 切换频率不好设置，可能导致特征不连贯
+
+### 方法三：Composite（组合预测方法）
+
+#### 核心原理
+Composite 方法是本项目的**核心创新**。它在每个去噪步骤中：
+1. 分别用每个 LoRA 独立预测噪声
+2. 将所有预测结果取**平均值**
+3. 用平均后的噪声进行去噪
+
+这样既避免了权重冲突，又能充分利用所有 LoRA 的信息。
+
+#### 代码实现
+
+在 `pipeline.py` 的第 1023-1081 行：
+
+```python
+# 在去噪循环中
+if lora_composite:
+    adapters = self.get_active_adapters()  # 获取所有激活的 LoRA
+
+# 在每个去噪步骤中
+if lora_composite:
+    noise_preds = []
+    self.enable_lora()
+    # 分别用每个 LoRA 预测噪声
+    for adapter in adapters:
+        self.set_adapters(adapter)  # 切换到当前 LoRA
+        noise_pred = self.unet(
+            latent_model_input,
+            t,
+            encoder_hidden_states=prompt_embeds,
+            timestep_cond=timestep_cond,
+            cross_attention_kwargs=self.cross_attention_kwargs,
+            added_cond_kwargs=added_cond_kwargs,
+            return_dict=False,
+        )[0]
+        noise_preds.append(noise_pred)
+else:
+    # 普通方法：只预测一次
+    noise_pred = self.unet(...)
+
+# 进行 CFG（Classifier-Free Guidance）
+if self.do_classifier_free_guidance:
+    if lora_composite:
+        noise_preds = torch.stack(noise_preds, dim=0)
+        # 分离条件和非条件预测
+        noise_pred_uncond, noise_pred_text = noise_preds.chunk(2, dim=1)
+        # 关键：对所有 LoRA 的预测取平均
+        noise_pred_uncond = noise_pred_uncond.mean(dim=0)
+        noise_pred_text = noise_pred_text.mean(dim=0)
+        # 应用 CFG
+        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+```
+
+#### 工作流程
+在每个去噪步骤 t：
+
+```
+1. 当前潜在变量 latent_t
+2. 用 LoRA_character 预测 → noise_pred_1
+3. 用 LoRA_clothing 预测 → noise_pred_2
+4. 用 LoRA_style 预测 → noise_pred_3
+5. 平均噪声 = mean(noise_pred_1, noise_pred_2, noise_pred_3)
+6. 用平均噪声更新 latent_t → latent_{t-1}
+```
+
+#### 使用方式
+
+```python
+# example.py
+if args.method == "composite":
+    pipeline.set_adapters(cur_loras)  # 激活所有 LoRA
+    switch_callback = None
+
+image = pipeline(
+    prompt=prompt,
+    lora_composite=True,  # 开启 composite 模式
+    ...
+)
+```
+
+#### 优点
+- ✅ **避免权重冲突**：各 LoRA 独立预测，不会互相干扰
+- ✅ **充分融合信息**：通过平均综合所有 LoRA 的特征
+- ✅ **稳定性好**：平均操作具有降噪效果
+
+#### 缺点
+- ❌ **计算开销大**：需要进行 n 次 UNet 前向传播（n 是 LoRA 数量）
+- ❌ **生成速度慢**：耗时是 Merge 方法的 n 倍
+- ❌ **显存占用高**：需要存储多个预测结果
+
+
+### 三种方法对比总结
+
+| 特性 | Merge | Switch | Composite |
+|------|-------|--------|-----------|
+| **激活方式** | 同时激活所有 LoRA | 轮流激活单个 LoRA | 分别激活每个 LoRA |
+| **前向传播次数** | 1次/步 | 1次/步 | n次/步 |
+| **计算开销** | 低 | 低 | 高（n倍） |
+| **生成速度** | 最快 | 快 | 最慢 |
+| **融合质量** | 一般 | 较好 | 最好 |
+| **特征冲突** | 严重 | 较少 | 无 |
 
 
 <h2 id="8.什么是Textual-Inversion(文本反演)？">8.什么是Textual Inversion(文本反演)？</h2>
@@ -528,4 +564,29 @@ PEFT主要通过三类策略实现高效微调：
 ### 💎 总结
 总的来说，PEFT通过“技能插件”的模式，让大模型轻量化定制成为可能。在AIGC图像生成领域，它正推动个性化创作向高效、普惠方向发展。未来，**如何将多个概念或风格适配器进行可控的组合与叠加**，实现更复杂的创意表达，是值得关注的方向。
 
+
+<h2 id="30.如何训练得到差异化LoRA？差异化LoRA的作用是什么？">30.如何训练得到差异化LoRA？差异化LoRA的作用是什么？</h2>
+
+**残差/差异化LoRA模型可以说是一种巧妙优雅的LoRA训练思想。**
+
+残差/差异化LoRA模型最早在AIGC开源社区被提出，展现了开源社区的集体智慧。这种LoRA模型的特殊性源自于其训练思想，**旨在让LoRA模型学习两类图像之间的差异**。因此，在LoRA、LoCon、LoHa等架构以及SD、FLUX等不同的AIGC大模型上都能运用这个训练思想，训练对应配套的残差/差异化LoRA模型。
+
+**训练得到的残差/差异化LoRA模型一般用于优化生成图像的整体质量（Low-Level功能），比如美颜美白、美肤、祛痘、磨皮、精修、细节增强、质感加强、光影增强等。**
+
+那么，残差/差异化LoRA模型是如何训练的呢？首先我们需要构建两张内容相似的图像：图 A 和图 B。例如下图所示，左图AI感更强，右图质感更强，整体更自然。
+
+![差异化LoRA素材图](./imgs/差异化LoRA素材图.jpg)
+
+在残差/差异化LoRA的训练中，我们分两步进行训练：
+
+1. 以图 A 为训练数据，由于训练数据仅有一张图，过拟合训练得到LoRA A。
+2. 以图 B 为训练数据，由于训练数据同样仅有一张图，再次过拟合训练得到LoRA B。
+
+接着我们将两个训练好的LoRA B和LoRA A做差：LoRA B - LoRA A，就最终得到了残差/差异化LoRA C模型。
+
+一张训练数据可以保证LoRA模型能够过拟合到训练数据上，但稳定性不足。为了提高稳定性，我们可以用多个图像对（image pairs）进行训练，从而得到效果更稳定的残差/差异化LoRA模型。
+
+到此为止，我们已经了解了残差/差异化LoRA模型的训练过程。我们可以举一反三，比如使用丑陋的和漂亮的图像对，训练提升图像美感的 LoRA；或者使用细节少的和细节丰富的图像对，训练增加图像细节的LoRA。
+
+**一般来说，使用残差/差异化LoRA模型时不需要提示词，对生成图像的构图几乎没有影响，可以说是一种“万金油”的LoRA模型系列。**
 
